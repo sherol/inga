@@ -4,6 +4,16 @@
 
 Agents drop markdown files into `reports/<project>/`. Inga browses them, stars the good ones, keeps a reading list, and writes notes in the margins.
 
+## Who is Inga?
+
+Inga comes from a thought experiment in Andy Clark and David Chalmers' 1998 paper *The Extended Mind*.
+
+Inga hears about an exhibition at the Museum of Modern Art. She remembers the museum is on 53rd Street, and she walks there. Otto has Alzheimer's disease, so he writes everything down in a notebook he always carries. When he hears about the same exhibition, he looks up the address in his notebook and walks there too.
+
+Clark and Chalmers argue that Otto's notebook does the same job as Inga's memory: it is reliable, always to hand, and he trusts what's in it. So the notebook is part of how Otto thinks. The mind doesn't have to stop at the skull.
+
+This project gives Inga a notebook as well. Agents do work and write it up, and the notebook keeps it findable, trusted and to hand, so their work becomes part of what she knows. The reports are the notebook's pages. Stars, the reading list and margin notes are how she makes it hers.
+
 - **Markdown files are the source of truth.** Each report is a `.md` file with YAML frontmatter. Everything (including stars and the reading list) lives in the files, so git tracks it all.
 - **SQLite is just an index.** `.inga/index.db` is built from the files for fast filtering and full-text search. It's gitignored, and you can delete it any time and rebuild it with `inga reindex`.
 
