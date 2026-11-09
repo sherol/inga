@@ -14,7 +14,7 @@ from typing import Any
 
 import yaml
 
-from .schema import Report, ValidationError, new_id, normalize_timestamp, slugify, today
+from .schema import DEFAULT_TOPICS, Report, ValidationError, new_id, normalize_timestamp, slugify, today
 
 FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
 FILENAME_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
@@ -44,6 +44,50 @@ def find_root(start: Path | None = None) -> Path:
 
 def reports_dir(root: Path) -> Path:
     return root / "reports"
+
+
+# ---------------------------------------------------------------- config
+
+CONFIG_NAME = "config.yaml"
+
+DEFAULT_CONFIG = """\
+# Inga's Notebook settings.
+
+# Allowed values for a report's `topic` (what it's about).
+# Edit freely. Delete this list to allow any topic.
+topics:
+""" + "".join(f"  - {t}\n" for t in DEFAULT_TOPICS)
+
+
+def config_path(root: Path) -> Path:
+    return root / ".inga" / CONFIG_NAME
+
+
+def load_config(root: Path) -> dict[str, Any]:
+    path = config_path(root)
+    if not path.is_file():
+        return {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise ValidationError(f"{path} must be a YAML mapping")
+    return data
+
+
+def allowed_topics(root: Path) -> list[str] | None:
+    """The notebook's topic list, or None if any topic is allowed."""
+    topics = load_config(root).get("topics")
+    if not topics:
+        return None
+    return [slugify(str(t)) for t in topics]
+
+
+def write_default_config(root: Path) -> bool:
+    path = config_path(root)
+    if path.exists():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(DEFAULT_CONFIG, encoding="utf-8")
+    return True
 
 
 def iter_report_files(root: Path):
@@ -84,7 +128,7 @@ _Dumper.add_representer(str, _str_representer)
 def _yaml_value(key: str, value: Any) -> Any:
     # Dates are stored as ISO strings; dump them as real YAML timestamps so
     # they appear unquoted (e.g. `date: 2026-11-08T10:30:00`).
-    if key in ("date", "read_at") and isinstance(value, str):
+    if key in ("date", "read_at", "obsolete_at") and isinstance(value, str):
         try:
             if len(value) == 10:
                 return dt.date.fromisoformat(value)
