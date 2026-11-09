@@ -1,0 +1,17 @@
+# Inga's Notebook settings.
+
+# Allowed values for a report's `topic` (what it's about).
+# Edit freely. Delete this list to allow any topic.
+topics:
+  - fundraising
+  - grants
+  - donors
+  - volunteers
+  - programs
+  - finance
+  - marketing
+  - governance
+  - hr
+  - technology
+  - operations
+  - other
