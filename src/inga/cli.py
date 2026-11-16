@@ -12,7 +12,9 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import index, store
-from .schema import REPORT_TYPES, STATUSES, Report, ValidationError, new_id, now, normalize_timestamp, today
+from .schema import (
+    REPORT_TYPES, STATUSES, Report, ValidationError, check_topic, new_id, normalize_timestamp, now, slugify, today,
+)
 
 console = Console()
 err = Console(stderr=True)
@@ -58,7 +60,16 @@ class Ctx:
             result = index.sync(self._conn, self.root)
             for path, msg in result.errors:
                 err.print(f"[yellow]skipped[/] {path.relative_to(self.root)}: {msg}")
+            for rid in result.obsoleted:
+                err.print(f"[dim]marked obsolete (superseded): {rid}[/]")
         return self._conn
+
+    @property
+    def topics(self) -> list[str] | None:
+        try:
+            return store.allowed_topics(self.root)
+        except (ValidationError, ValueError) as exc:
+            raise click.ClickException(f"bad .inga/config.yaml: {exc}")
 
 
 pass_ctx = click.make_pass_decorator(Ctx)
@@ -79,6 +90,7 @@ def _report_table(rows, show_snippet: bool = False) -> Table:
     table.add_column("📖", no_wrap=True)
     table.add_column("date", no_wrap=True)
     table.add_column("project", style="cyan", no_wrap=True)
+    table.add_column("topic", style="blue", no_wrap=True)
     table.add_column("name", style="bold")
     table.add_column("type", style="magenta", no_wrap=True)
     table.add_column("tags", style="green")
@@ -88,6 +100,8 @@ def _report_table(rows, show_snippet: bool = False) -> Table:
             name = f"• {name}"
         elif r["status"] == "archived":
             name = f"[dim]{name}[/]"
+        elif r["status"] == "obsolete":
+            name = f"[dim strike]{name}[/] [red]obsolete[/]"
         if show_snippet and r["snippet"]:
             name += "\n[dim]" + " ".join(r["snippet"].split()) + "[/]"
         elif r["summary"]:
@@ -98,6 +112,7 @@ def _report_table(rows, show_snippet: bool = False) -> Table:
             "✓" if r["reading_list"] else "",
             _fmt_date(r["date"]),
             r["project"],
+            r["topic"] or "",
             name,
             r["type"],
             (r["tags"] or "").replace(",", ", "),
@@ -125,6 +140,8 @@ def _update(ctx: Ctx, ref: str, **changes) -> Report:
             meta[key] = value
     try:
         report = Report.from_meta(meta)
+        if "topic" in changes:
+            check_topic(report.topic, ctx.topics)
     except ValidationError as exc:
         raise click.ClickException(str(exc))
     store.save(path, report, loaded.body)
@@ -158,6 +175,8 @@ def init(folder: str):
     gi = root / ".inga" / ".gitignore"
     if not gi.exists():
         gi.write_text("index.db*\n")
+    if store.write_default_config(root):
+        console.print("[dim]wrote .inga/config.yaml (edit it to change the topic list)[/]")
     conn = index.connect(root)
     index.sync(conn, root)
     console.print(f"[green]✓[/] notebook ready at {root}")
@@ -170,15 +189,17 @@ def init(folder: str):
 @click.option("-p", "--project", required=True, help="Project the report belongs to.")
 @click.option("-n", "--name", required=True, help="Report title.")
 @click.option("-t", "--type", "rtype", type=click.Choice(REPORT_TYPES), default="other", show_default=True)
+@click.option("--topic", help="What it's about (see `inga topics`).")
 @click.option("--tags", default="", help="Comma-separated tags.")
 @click.option("-a", "--author", help="Agent/model/session that wrote it.")
 @click.option("-s", "--summary", help="One or two sentence TL;DR.")
 @click.option("--source", help="URL / PR / session link that produced the report.")
 @click.option("--related", default="", help="Comma-separated ids of related reports.")
+@click.option("--supersedes", default="", help="Comma-separated ids of reports this one replaces (they become obsolete).")
 @click.option("--date", "date_", help="ISO date/datetime (default: now).")
 @click.option("--body-file", type=click.File("r"), help="Read the report body from a file, or '-' for stdin.")
 @pass_ctx
-def new(ctx: Ctx, project, name, rtype, tags, author, summary, source, related, date_, body_file):
+def new(ctx: Ctx, project, name, rtype, topic, tags, author, summary, source, related, supersedes, date_, body_file):
     """Create a new report file and print its path.
 
     With --body-file the report is complete; otherwise a template is written
@@ -187,9 +208,10 @@ def new(ctx: Ctx, project, name, rtype, tags, author, summary, source, related, 
     try:
         date = normalize_timestamp(date_) if date_ else now()
         report = Report.from_meta(
-            dict(id=new_id(date), date=date, name=name, project=project, type=rtype, tags=tags,
-                 author=author, summary=summary, source=source, related=related)
+            dict(id=new_id(date), date=date, name=name, project=project, topic=topic, type=rtype, tags=tags,
+                 author=author, summary=summary, source=source, related=related, supersedes=supersedes)
         )
+        check_topic(report.topic, ctx.topics)
     except ValidationError as exc:
         raise click.ClickException(str(exc))
     body = body_file.read() if body_file else TEMPLATE_BODY.format(name=name)
@@ -202,9 +224,10 @@ def new(ctx: Ctx, project, name, rtype, tags, author, summary, source, related, 
 @main.command()
 @click.argument("files", nargs=-1, required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("-p", "--project", help="Project, if the file doesn't say.")
+@click.option("--topic", help="Topic, if the file doesn't say.")
 @click.option("--copy", is_flag=True, help="Copy instead of moving the file.")
 @pass_ctx
-def add(ctx: Ctx, files, project, copy):
+def add(ctx: Ctx, files, project, topic, copy):
     """File existing markdown report(s) into the notebook.
 
     Missing id/date are filled in, a name is taken from the first heading if
@@ -216,10 +239,13 @@ def add(ctx: Ctx, files, project, copy):
             meta, body = store.split(text)
             if project and not meta.get("project"):
                 meta["project"] = project
+            if topic and not meta.get("topic"):
+                meta["topic"] = topic
             if not meta.get("date"):
                 meta["date"] = today()
             store.fill_missing(meta, body, src, None)
             report = Report.from_meta(meta)
+            check_topic(report.topic, ctx.topics)
         except ValidationError as exc:
             raise click.ClickException(f"{src}: {exc}")
         dest = store.target_path(ctx.root, report)
@@ -236,11 +262,12 @@ def add(ctx: Ctx, files, project, copy):
 def _filter_options(f):
     opts = [
         click.option("-p", "--project", help="Only this project."),
+        click.option("--topic", help="Only this topic."),
         click.option("--starred", "-*", "starred", is_flag=True, help="Only starred."),
         click.option("--reading-list", "-r", "reading_list", is_flag=True, help="Only on the reading list."),
         click.option("--unread", "-u", is_flag=True, help="Only unread."),
         click.option("--status", type=click.Choice(STATUSES)),
-        click.option("--all", "-A", "include_archived", is_flag=True, help="Include archived reports."),
+        click.option("--all", "-A", "include_archived", is_flag=True, help="Include archived and obsolete reports."),
         click.option("--tag", help="Only reports with this tag."),
         click.option("--type", "rtype", type=click.Choice(REPORT_TYPES)),
         click.option("--author", help="Author contains this text."),
@@ -252,9 +279,9 @@ def _filter_options(f):
     return f
 
 
-def _filters(project, starred, reading_list, unread, status, include_archived, tag, rtype, author, since, until):
+def _filters(project, topic, starred, reading_list, unread, status, include_archived, tag, rtype, author, since, until):
     return index.Filters(
-        project=project, starred=starred, reading_list=reading_list,
+        project=project, topic=slugify(topic) if topic else None, starred=starred, reading_list=reading_list,
         status="unread" if unread else status, include_archived=include_archived,
         tag=tag, type=rtype, author=author, since=since, until=until,
     )
@@ -322,7 +349,8 @@ def show(ctx: Ctx, ref, mark_read, raw, path_only):
         )
         header = "\n".join(
             x for x in (
-                f"[cyan]{row['project']}[/] · {row['type']} · {_fmt_date(row['date'])}",
+                " · ".join(x for x in (f"[cyan]{row['project']}[/]", f"[blue]{row['topic']}[/]" if row["topic"] else "",
+                                       row["type"], _fmt_date(row["date"])) if x),
                 f"by {row['author']}" if row["author"] else None,
                 f"[green]{', '.join(tags)}[/]" if tags else None,
                 f"source: {row['source']}" if row["source"] else None,
@@ -330,6 +358,17 @@ def show(ctx: Ctx, ref, mark_read, raw, path_only):
                 f"[dim]{row['id']} · {row['path']} · {row['word_count']} words[/]",
             ) if x
         )
+        replaces, replaced_by = index.supersession(ctx.conn, row["id"])
+        if row["status"] == "obsolete":
+            lines = ["This report is out of date."]
+            if row["superseded_by"]:
+                newer = f"{replaced_by['id']} {replaced_by['name']}" if replaced_by else f"{row['superseded_by']} [red](missing)[/]"
+                lines.append(f"Superseded by: [bold]{newer}[/]")
+            if row["obsolete_reason"]:
+                lines.append(f"Reason: {row['obsolete_reason']}")
+            if row["obsolete_at"]:
+                lines.append(f"[dim]Marked obsolete {_fmt_date(row['obsolete_at'])}[/]")
+            console.print(Panel("\n".join(lines), title="[bold red]Obsolete[/]", border_style="red", title_align="left"))
         console.print(Panel(header, title=f"[bold]{row['name']}[/]", title_align="left"))
         if row["summary"]:
             console.print(f"[italic]{row['summary']}[/]\n")
@@ -337,13 +376,15 @@ def show(ctx: Ctx, ref, mark_read, raw, path_only):
             console.print(Panel(row["notes"], title="Inga's notes", border_style="yellow", title_align="left"))
         console.print(Markdown(row["body"]))
         out, back = index.links(ctx.conn, row["id"])
-        if out or back:
+        if out or back or replaces:
             console.print()
+            for r in replaces:
+                console.print(f"[dim]⟲ replaces:[/] {r['id']} [strike]{r['name']}[/]")
             for r in out:
                 console.print(f"[dim]→ related:[/] {r['id']} {r['name'] or '[red](missing)[/]'}")
             for r in back:
                 console.print(f"[dim]← linked from:[/] {r['id']} {r['name']}")
-    if mark_read and row["status"] != "read":
+    if mark_read and row["status"] not in ("read", "obsolete"):
         _update(ctx, row["id"], status="read", read_at=now())
 
 
@@ -496,6 +537,86 @@ def tag(ctx: Ctx, ref, add_tags, remove_tags):
     _done(_update(ctx, row["id"], tags=new_tags or None), f"tags: {', '.join(new_tags) or '(none)'}")
 
 
+@main.command()
+@click.argument("refs", nargs=-1, required=True)
+@click.option("--by", "by_ref", help="The newer report that replaces it.")
+@click.option("--reason", help="Why it's out of date.")
+@pass_ctx
+def obsolete(ctx: Ctx, refs, by_ref, reason):
+    """Mark report(s) obsolete: out of date, hidden from lists unless --all."""
+    newer = _resolve(ctx, by_ref) if by_ref else None
+    for ref in refs:
+        row = _resolve(ctx, ref)
+        if newer is not None and newer["id"] == row["id"]:
+            raise click.ClickException("a report can't supersede itself")
+        changes = dict(status="obsolete", reading_list=False, obsolete_at=row["obsolete_at"] or now())
+        if newer is not None:
+            changes["superseded_by"] = newer["id"]
+        if reason:
+            changes["obsolete_reason"] = reason
+        report = _update(ctx, row["id"], **changes)
+        if newer is not None:
+            # Record the link on the newer report too, so it says what it replaces.
+            current = store.load(ctx.root / newer["path"], ctx.root).report.supersedes
+            if report.id not in current:
+                _update(ctx, newer["id"], supersedes=current + [report.id])
+        _done(report, "marked obsolete" + (f", superseded by {newer['id']}" if newer is not None else ""))
+
+
+@main.command()
+@click.argument("refs", nargs=-1, required=True)
+@pass_ctx
+def unobsolete(ctx: Ctx, refs):
+    """Undo `obsolete`: the report goes back to read, and any supersede links are removed."""
+    for ref in refs:
+        row = _resolve(ctx, ref)
+        # Drop it from any newer report's `supersedes`, or the next sync would re-obsolete it.
+        for (newer_id,) in ctx.conn.execute(
+            "SELECT report_id FROM report_supersedes WHERE old_id = ?", (row["id"],)
+        ).fetchall():
+            newer = _resolve(ctx, newer_id)
+            current = store.load(ctx.root / newer["path"], ctx.root).report.supersedes
+            _update(ctx, newer_id, supersedes=[i for i in current if i != row["id"]] or None)
+        report = _update(ctx, row["id"], status="read", superseded_by=None, obsolete_reason=None, obsolete_at=None)
+        _done(report, "no longer obsolete")
+
+
+@main.command()
+@click.option("-p", "--project")
+@pass_ctx
+def topics(ctx: Ctx, project):
+    """Topics with report counts, including allowed topics with no reports yet."""
+    allowed = ctx.topics
+    counts = {r["topic"]: r for r in index.topic_counts(ctx.conn, project)}
+    table = Table(box=None, header_style="bold")
+    for col in ("topic", "reports", "unread", "latest"):
+        table.add_column(col, justify="right" if col in ("reports", "unread") else "left")
+    names = list(counts) + [t for t in (allowed or []) if t not in counts]
+    for name in names:
+        r = counts.get(name)
+        label = name or "[dim](no topic)[/]"
+        if allowed is not None and name and name not in allowed:
+            label += " [red](not on list)[/]"
+        table.add_row(label, str(r["total"]) if r else "[dim]0[/]", str(r["unread"]) if r else "",
+                      _fmt_date(r["latest"]) if r else "")
+    console.print(table)
+    if allowed is None:
+        console.print("[dim]Any topic is allowed. Add a `topics:` list to .inga/config.yaml to fix the list.[/]")
+
+
+@main.command("set-topic")
+@click.argument("ref")
+@click.argument("topic", required=False)
+@click.option("--clear", is_flag=True, help="Remove the topic.")
+@pass_ctx
+def set_topic(ctx: Ctx, ref, topic, clear):
+    """Set (or --clear) a report's topic."""
+    if not topic and not clear:
+        raise click.UsageError("give a TOPIC, or --clear")
+    report = _update(ctx, ref, topic=None if clear else topic)
+    _done(report, f"topic: {report.topic}" if report.topic else "topic cleared")
+
+
 # ---------------------------------------------------------------- maintenance
 
 
@@ -517,6 +638,8 @@ def validate(ctx: Ctx):
     """Check every report file against the schema. Exits 1 on problems."""
     problems = 0
     ids: dict[str, Path] = {}
+    refs: list[tuple[Path, str, str]] = []
+    allowed = ctx.topics
     for path in store.iter_report_files(ctx.root):
         rel = path.relative_to(ctx.root)
         try:
@@ -525,6 +648,7 @@ def validate(ctx: Ctx):
                 err.print(f"[yellow]warn[/] {rel}: no id (one will be assigned on next sync)")
             store.fill_missing(meta, body, path, ctx.root)
             report = Report.from_meta(meta)
+            check_topic(report.topic, allowed)
         except (ValidationError, ValueError) as exc:
             err.print(f"[red]error[/] {rel}: {exc}")
             problems += 1
@@ -533,9 +657,15 @@ def validate(ctx: Ctx):
             err.print(f"[red]error[/] {rel}: duplicate id {report.id} (also {ids[report.id]})")
             problems += 1
         ids.setdefault(report.id, rel)
+        refs += [(rel, "supersedes", i) for i in report.supersedes]
+        if report.superseded_by:
+            refs.append((rel, "superseded_by", report.superseded_by))
         expected = store.reports_dir(ctx.root) / report.project
         if path.parent != expected:
             err.print(f"[yellow]warn[/] {rel}: project is {report.project!r} but file is not in reports/{report.project}/")
+    for rel, key, target in refs:
+        if target not in ids:
+            err.print(f"[yellow]warn[/] {rel}: {key} points to unknown id {target}")
     if problems:
         raise SystemExit(1)
     console.print(f"[green]✓[/] {len(ids)} report(s) valid")

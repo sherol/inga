@@ -170,3 +170,90 @@ def test_projects_and_ambiguous_prefix(nb):
     assert "alpha" in nb("projects").output
     r = CliRunner().invoke(main, ["star", "2"])
     assert r.exit_code != 0 and "matches" in r.output
+
+
+# ---------------------------------------------------------------- topics
+
+
+def test_init_writes_topic_list(nb):
+    assert "fundraising" in (nb.root / ".inga" / "config.yaml").read_text()
+
+
+def test_topic_validated_against_list(nb):
+    path, rep = new_report(nb, "alpha", "Gala sponsors", "--topic", "Fundraising")
+    assert rep.topic == "fundraising"
+    r = nb("new", "-p", "alpha", "-n", "Bad", "--topic", "astrology")
+    assert r.exit_code != 0 and "not on the list" in r.output
+
+    assert "Gala sponsors" in nb("list", "--topic", "fundraising").output
+    assert "Gala sponsors" not in nb("list", "--topic", "grants").output
+
+    nb("set-topic", rep.id, "grants")
+    assert store.split(path.read_text())[0]["topic"] == "grants"
+    assert nb("set-topic", rep.id, "astrology").exit_code != 0
+
+    out = nb("topics").output
+    assert "grants" in out and "volunteers" in out  # allowed-but-unused topics listed too
+
+
+def test_hand_written_bad_topic_fails_validate(nb):
+    write(nb.root, "reports/p/2026-11-02-x.md", "---\ndate: 2026-11-02\nname: X\ntopic: astrology\n---\n")
+    assert "X" in nb("list").output  # still indexed
+    assert nb("validate").exit_code == 1
+
+
+def test_any_topic_without_list(nb):
+    (nb.root / ".inga" / "config.yaml").write_text("# no topics\n")
+    _, rep = new_report(nb, "alpha", "Anything", "--topic", "astrology")
+    assert rep.topic == "astrology"
+
+
+# ---------------------------------------------------------------- obsolete
+
+
+def test_obsolete_by_links_and_hides(nb):
+    old_path, old = new_report(nb, "alpha", "Old numbers")
+    new_path, new = new_report(nb, "alpha", "New numbers")
+    nb("queue", old.id)
+    r = nb("obsolete", old.id, "--by", new.id, "--reason", "figures updated")
+    assert r.exit_code == 0, r.output
+
+    meta = store.split(old_path.read_text())[0]
+    assert meta["status"] == "obsolete" and meta["superseded_by"] == new.id
+    assert meta["obsolete_reason"] == "figures updated" and meta["obsolete_at"]
+    assert meta["reading_list"] is False
+    assert store.split(new_path.read_text())[0]["supersedes"] == [old.id]
+
+    assert "Old numbers" not in nb("list").output
+    assert "Old numbers" in nb("list", "--all").output
+    assert "Old numbers" in nb("list", "--status", "obsolete").output
+
+    shown = nb("show", old.id).output
+    assert "Obsolete" in shown and "New numbers" in shown and "figures updated" in shown
+    assert "replaces" in nb("show", new.id).output
+
+    (nb.root / ".inga" / "index.db").unlink()
+    nb("reindex")
+    assert "Old numbers" not in nb("list").output
+
+    nb("unobsolete", old.id)
+    assert "Old numbers" in nb("list").output
+    assert "supersedes" not in store.split(new_path.read_text())[0]
+
+
+def test_agent_supersedes_marks_old_obsolete(nb):
+    old_path, old = new_report(nb, "alpha", "Draft plan")
+    r = nb("new", "-p", "alpha", "-n", "Final plan", "--supersedes", old.id)
+    assert r.exit_code == 0, r.output
+    meta = store.split(old_path.read_text())[0]
+    assert meta["status"] == "obsolete" and meta["superseded_by"].startswith(old.id[:9])
+    assert "Draft plan" not in nb("list").output
+
+
+def test_hand_written_superseded_by_is_applied(nb):
+    _, old = new_report(nb, "alpha", "Stale")
+    _, new = new_report(nb, "alpha", "Fresh")
+    p = nb.root / nb("show", old.id, "--path").output.strip()
+    p.write_text(p.read_text().replace("status: unread", f"superseded_by: {new.id}\nstatus: unread"))
+    assert "Stale" not in nb("list").output
+    assert store.split(p.read_text())[0]["status"] == "obsolete"

@@ -10,7 +10,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 REPORT_TYPES = ("research", "review", "summary", "status", "analysis", "other")
-STATUSES = ("unread", "read", "archived")
+STATUSES = ("unread", "read", "archived", "obsolete")
+HIDDEN_STATUSES = ("archived", "obsolete")  # left out of lists unless --all
+DEFAULT_TOPICS = (
+    "fundraising", "grants", "donors", "volunteers", "programs", "finance",
+    "marketing", "governance", "hr", "technology", "operations", "other",
+)
 REQUIRED = ("date", "name", "project")
 
 # Canonical order of frontmatter keys when a file is written.
@@ -19,22 +24,29 @@ FIELD_ORDER = (
     "date",
     "name",
     "project",
+    "topic",
     "author",
     "type",
     "summary",
     "tags",
     "source",
     "related",
+    "supersedes",
+    "superseded_by",
     "star",
     "reading_list",
     "status",
     "read_at",
     "rating",
     "notes",
+    "obsolete_reason",
+    "obsolete_at",
 )
 
 # Fields only a human (via the CLI) should change; agents leave them alone.
-CURATION_FIELDS = ("star", "reading_list", "status", "read_at", "rating", "notes")
+CURATION_FIELDS = (
+    "star", "reading_list", "status", "read_at", "rating", "notes", "obsolete_reason", "obsolete_at",
+)
 
 
 class ValidationError(ValueError):
@@ -105,18 +117,23 @@ class Report:
     date: str
     name: str
     project: str
+    topic: str | None = None
     author: str | None = None
     type: str = "other"
     summary: str | None = None
     tags: list[str] = field(default_factory=list)
     source: str | None = None
     related: list[str] = field(default_factory=list)
+    supersedes: list[str] = field(default_factory=list)  # ids this report replaces
+    superseded_by: str | None = None  # id of the report that replaced this one
     star: bool = False
     reading_list: bool = False
     status: str = "unread"
     read_at: str | None = None
     rating: int | None = None
     notes: str | None = None
+    obsolete_reason: str | None = None
+    obsolete_at: str | None = None
     # Unknown frontmatter keys are kept so nothing an agent wrote is lost.
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -158,18 +175,23 @@ class Report:
             date=normalize_timestamp(meta["date"]),
             name=str(meta["name"]),
             project=slugify(str(meta["project"])),
+            topic=slugify(str(meta["topic"])) if meta.get("topic") else None,
             author=opt_str("author"),
             type=rtype,
             summary=opt_str("summary"),
             tags=[t.lower() for t in _as_list(meta.get("tags"))],
             source=opt_str("source"),
             related=_as_list(meta.get("related")),
+            supersedes=_as_list(meta.get("supersedes")),
+            superseded_by=opt_str("superseded_by"),
             star=_as_bool(meta.get("star"), "star"),
             reading_list=_as_bool(meta.get("reading_list"), "reading_list"),
             status=status,
             read_at=normalize_timestamp(meta.get("read_at")),
             rating=rating,
             notes=opt_str("notes"),
+            obsolete_reason=opt_str("obsolete_reason"),
+            obsolete_at=normalize_timestamp(meta.get("obsolete_at")),
             extra={k: v for k, v in meta.items() if k not in known},
         )
 
@@ -188,3 +210,9 @@ class Report:
                 out[key] = value
         out.update(self.extra)
         return out
+
+
+def check_topic(topic: str | None, allowed: list[str] | None) -> None:
+    """Raise if `topic` isn't on the notebook's topic list (None = any topic allowed)."""
+    if topic and allowed is not None and topic not in allowed:
+        raise ValidationError(f"topic {topic!r} is not on the list: {', '.join(allowed)}")
