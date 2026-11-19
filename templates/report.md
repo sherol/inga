@@ -10,7 +10,8 @@ tags: [example, onboarding]
 source: https://github.com/owner/repo/pull/123   # optional: what produced this report
 related: []                        # optional: ids of related reports
 supersedes: []                     # optional: ids of older reports this replaces (they become obsolete)
-# Do not set star, reading_list, status, read_at, rating or notes: those are Inga's.
+# Do not set star, reading_list, status, read_at, rating, notes or feedback: those are Inga's.
+# Before writing, read past feedback: inga feedback --project <project>
 ---
 
 # Short descriptive title

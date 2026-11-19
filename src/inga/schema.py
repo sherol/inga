@@ -41,16 +41,41 @@ FIELD_ORDER = (
     "notes",
     "obsolete_reason",
     "obsolete_at",
+    "feedback",
 )
 
 # Fields only a human (via the CLI) should change; agents leave them alone.
 CURATION_FIELDS = (
-    "star", "reading_list", "status", "read_at", "rating", "notes", "obsolete_reason", "obsolete_at",
+    "star", "reading_list", "status", "read_at", "rating", "notes", "obsolete_reason", "obsolete_at", "feedback",
 )
 
 
 class ValidationError(ValueError):
     pass
+
+
+def _feedback(value: Any) -> list[dict[str, Any]]:
+    """Normalize feedback to a list of {at, text, ...} entries."""
+    if value in (None, "", []):
+        return []
+    if isinstance(value, str):
+        value = [{"text": value}]
+    if not isinstance(value, list):
+        raise ValidationError("feedback must be a list of {at, text} entries")
+    out = []
+    for i, entry in enumerate(value, 1):
+        if isinstance(entry, str):
+            entry = {"text": entry}
+        if not isinstance(entry, dict):
+            raise ValidationError(f"feedback entry {i} must be a mapping with `text`")
+        text = str(entry.get("text") or "").strip()
+        if not text:
+            raise ValidationError(f"feedback entry {i} has no text")
+        out.append({"at": normalize_timestamp(entry.get("at")), "text": text,
+                    **{k: v for k, v in entry.items() if k not in ("at", "text")}})
+        if out[-1]["at"] is None:
+            del out[-1]["at"]
+    return out
 
 
 def slugify(text: str, max_len: int = 60) -> str:
@@ -134,6 +159,8 @@ class Report:
     notes: str | None = None
     obsolete_reason: str | None = None
     obsolete_at: str | None = None
+    # Inga's feedback on the report itself, for its author: [{at, text}, ...], oldest first.
+    feedback: list[dict[str, Any]] = field(default_factory=list)
     # Unknown frontmatter keys are kept so nothing an agent wrote is lost.
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -192,6 +219,7 @@ class Report:
             notes=opt_str("notes"),
             obsolete_reason=opt_str("obsolete_reason"),
             obsolete_at=normalize_timestamp(meta.get("obsolete_at")),
+            feedback=_feedback(meta.get("feedback")),
             extra={k: v for k, v in meta.items() if k not in known},
         )
 
