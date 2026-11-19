@@ -273,17 +273,19 @@ def _filter_options(f):
         click.option("--author", help="Author contains this text."),
         click.option("--since", help="On/after this date (YYYY-MM-DD)."),
         click.option("--until", help="On/before this date (YYYY-MM-DD)."),
+        click.option("--has-feedback", is_flag=True, help="Only reports with feedback."),
     ]
     for opt in reversed(opts):
         f = opt(f)
     return f
 
 
-def _filters(project, topic, starred, reading_list, unread, status, include_archived, tag, rtype, author, since, until):
+def _filters(project, topic, starred, reading_list, unread, status, include_archived, tag, rtype, author, since, until,
+             has_feedback=False):
     return index.Filters(
         project=project, topic=slugify(topic) if topic else None, starred=starred, reading_list=reading_list,
         status="unread" if unread else status, include_archived=include_archived,
-        tag=tag, type=rtype, author=author, since=since, until=until,
+        tag=tag, type=rtype, author=author, since=since, until=until, has_feedback=has_feedback,
     )
 
 
@@ -374,6 +376,14 @@ def show(ctx: Ctx, ref, mark_read, raw, path_only):
             console.print(f"[italic]{row['summary']}[/]\n")
         if row["notes"]:
             console.print(Panel(row["notes"], title="Inga's notes", border_style="yellow", title_align="left"))
+        fb = ctx.conn.execute(
+            "SELECT at, text FROM report_feedback WHERE report_id = ? ORDER BY seq", (row["id"],)
+        ).fetchall()
+        if fb:
+            console.print(Panel(
+                "\n".join(f"[dim]{_fmt_date(e['at']) if e['at'] else '—'}[/]  {e['text']}" for e in fb),
+                title="Feedback for the author", border_style="magenta", title_align="left",
+            ))
         console.print(Markdown(row["body"]))
         out, back = index.links(ctx.conn, row["id"])
         if out or back or replaces:
@@ -602,6 +612,49 @@ def topics(ctx: Ctx, project):
     console.print(table)
     if allowed is None:
         console.print("[dim]Any topic is allowed. Add a `topics:` list to .inga/config.yaml to fix the list.[/]")
+
+
+@main.command()
+@click.argument("ref", required=False)
+@click.argument("text", required=False)
+@click.option("--clear", is_flag=True, help="Remove all feedback from the report.")
+@_filter_options
+@click.option("-n", "--limit", type=int, default=50, show_default=True)
+@pass_ctx
+def feedback(ctx: Ctx, ref, text, clear, limit, **kw):
+    """Give feedback on a report, or read feedback.
+
+    \b
+    inga feedback <id> "Too long; lead with the recommendations."   add feedback
+    inga feedback <id>                                              that report's feedback
+    inga feedback --project gala --author claude                    recent feedback, for agents
+    """
+    if ref and (text or clear):
+        if clear:
+            _done(_update(ctx, ref, feedback=None), "feedback cleared")
+            return
+        current = store.load(ctx.root / _resolve(ctx, ref)["path"], ctx.root).report.feedback
+        report = _update(ctx, ref, feedback=current + [{"at": now(), "text": text}])
+        _done(report, f"feedback added ({len(report.feedback)} total)")
+        return
+    if clear:
+        raise click.UsageError("--clear needs a report id")
+
+    f = _filters(**kw)
+    f.include_archived = True  # feedback on old reports is still useful
+    if ref:
+        rows = [r for r in index.feedback_list(ctx.conn, f) if r["id"] == _resolve(ctx, ref)["id"]]
+    else:
+        rows = index.feedback_list(ctx.conn, f, limit=limit)
+    if not rows:
+        console.print("[dim]No feedback yet.[/]")
+        return
+    for r in rows:
+        who = f" · by {r['author']}" if r["author"] else ""
+        rating = f" · rated {r['rating']}/5" if r["rating"] else ""
+        console.print(f"[magenta]{_fmt_date(r['at']) if r['at'] else '—'}[/]  [bold]{r['name']}[/] "
+                      f"[dim]({r['id']} · {r['project']}{' · ' + r['topic'] if r['topic'] else ''} · {r['type']}{who}{rating})[/]")
+        console.print(f"    {r['text']}\n")
 
 
 @main.command("set-topic")

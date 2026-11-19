@@ -39,7 +39,9 @@ inga archive <id>                 # hidden from lists unless --all
 inga obsolete <id> --by <newer-id> --reason "figures updated"   # out of date; hidden unless --all
 inga unobsolete <id>
 inga rate <id> 4                  # 1–5, 0 clears
-inga note <id> "follow up with Sam"
+inga note <id> "follow up with Sam"   # private margin notes
+inga feedback <id> "Too long; lead with the recommendations"   # feedback for the author
+inga feedback --project gala      # read recent feedback (what agents run before writing)
 inga tag <id> --add a,b --remove c
 inga set-topic <id> grants
 
@@ -85,6 +87,7 @@ You can also write `reports/<project>/<date>-<slug>.md` directly using [template
 | `read_at` | datetime | auto |
 | `rating` | 1–5 | Inga |
 | `notes` | string | Inga |
+| `feedback` | list of `{at, text}` | Inga |
 | `obsolete_reason` | string | Inga |
 | `obsolete_at` | datetime | auto |
 
@@ -94,6 +97,12 @@ You can also write `reports/<project>/<date>-<slug>.md` directly using [template
 - **topic**: what it's about (`fundraising`). This comes from the list in `.inga/config.yaml`, which you can edit. Delete the list to allow any topic.
 - **type**: what kind of report it is (`research`, `review`, …).
 - **tags**: any extra labels (`q1`, `follow-up`).
+
+### Feedback
+
+`notes` are Inga's private margin notes about what a report says. `feedback` is for whoever wrote it: what to do better or keep doing. Each `inga feedback <id> "..."` adds a dated entry to the report's file. `inga show` lists them in a "Feedback for the author" box, and `inga list --has-feedback` finds reports that have some.
+
+Agents are told in [AGENTS.md](AGENTS.md) to run `inga feedback --project <p>` (or `--author <name>`) before they write, so their next reports take it into account.
 
 ### Obsolete reports
 

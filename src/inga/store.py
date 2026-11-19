@@ -135,6 +135,9 @@ def _yaml_value(key: str, value: Any) -> Any:
             return dt.datetime.fromisoformat(value)
         except ValueError:
             return value
+    if key == "feedback" and isinstance(value, list):
+        return [{k: _yaml_value("date" if k == "at" else k, v) for k, v in e.items()}
+                if isinstance(e, dict) else e for e in value]
     return value
 
 

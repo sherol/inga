@@ -257,3 +257,61 @@ def test_hand_written_superseded_by_is_applied(nb):
     p.write_text(p.read_text().replace("status: unread", f"superseded_by: {new.id}\nstatus: unread"))
     assert "Stale" not in nb("list").output
     assert store.split(p.read_text())[0]["status"] == "obsolete"
+
+
+# ---------------------------------------------------------------- feedback
+
+
+def test_feedback_appends_and_writes_back(nb):
+    path, rep = new_report(nb, "gala", "Sponsor list", "-a", "claude")
+    nb("feedback", rep.id, "Too long; lead with the recommendations.")
+    r = nb("feedback", rep.id, "Great table format, keep it.")
+    assert "2 total" in r.output
+
+    meta, body = store.split(path.read_text())
+    assert body == BODY
+    assert [e["text"] for e in meta["feedback"]] == [
+        "Too long; lead with the recommendations.", "Great table format, keep it."]
+    assert all(e.get("at") for e in meta["feedback"])
+    assert "'20" not in path.read_text()  # timestamps unquoted
+
+    shown = nb("show", rep.id).output
+    assert "Feedback for the author" in shown and "Great table format" in shown
+
+    (nb.root / ".inga" / "index.db").unlink()
+    nb("reindex")
+    assert "lead with the recommendations" in nb("feedback", rep.id).output
+
+    nb("feedback", rep.id, "--clear")
+    assert "feedback" not in store.split(path.read_text())[0]
+
+
+def test_feedback_listing_filters(nb):
+    _, a = new_report(nb, "gala", "Gala report", "-a", "claude")
+    _, b = new_report(nb, "appeal", "Appeal report", "-a", "otto-bot")
+    _, c = new_report(nb, "gala", "No feedback here")
+    nb("feedback", a.id, "Cite sources for each figure.")
+    nb("feedback", b.id, "Use plain language.")
+
+    out = nb("feedback").output
+    assert "Cite sources" in out and "plain language" in out
+    out = nb("feedback", "--project", "gala").output
+    assert "Cite sources" in out and "plain language" not in out
+    out = nb("feedback", "--author", "otto").output
+    assert "plain language" in out and "Cite sources" not in out
+
+    out = nb("list", "--has-feedback").output
+    assert "Gala report" in out and "No feedback here" not in out
+    assert "Gala report" in nb("search", "sources").output
+
+
+def test_bad_feedback_entry_fails_validate(nb):
+    write(nb.root, "reports/p/2026-11-02-x.md",
+          "---\ndate: 2026-11-02\nname: X\nfeedback:\n  - at: 2026-11-03\n---\n")
+    assert nb("validate").exit_code == 1
+
+
+def test_feedback_as_plain_string_is_accepted(nb):
+    p = write(nb.root, "reports/p/2026-11-02-y.md",
+              "---\ndate: 2026-11-02\nname: Y\nfeedback: Shorter please\n---\n")
+    assert "Shorter please" in nb("feedback").output

@@ -2,6 +2,17 @@
 
 You're an agent and you've written a report. Here's how to file it so Inga can find it.
 
+## Before you write: read the feedback
+
+Inga leaves feedback on reports for the agents that wrote them. Read it first and apply it:
+
+```bash
+inga feedback --project my-project          # recent feedback in this project
+inga feedback --author <your name>          # feedback on reports you wrote
+```
+
+Don't edit the `feedback` field yourself. It's Inga's.
+
 ## Option A: use the CLI (preferred)
 
 ```bash
@@ -58,6 +69,7 @@ Or write the file anywhere and run `inga add path/to/file.md --project my-projec
 | `read_at` | — | tool | stamped when marked read |
 | `rating` | — | **Inga** | 1–5 |
 | `notes` | — | **Inga** | margin notes |
+| `feedback` | — | **Inga** | feedback for the author: a list of `{at, text}`; read it, don't write it |
 | `obsolete_reason`, `obsolete_at` | — | **Inga**/tool | set when a report is marked obsolete |
 
 ## Replacing an older report

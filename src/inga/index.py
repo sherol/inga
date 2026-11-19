@@ -15,7 +15,7 @@ from pathlib import Path
 from . import store
 from .schema import HIDDEN_STATUSES, Report, ValidationError, now
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS reports (
@@ -69,8 +69,16 @@ CREATE TABLE IF NOT EXISTS report_supersedes (
     PRIMARY KEY (report_id, old_id)
 );
 
+CREATE TABLE IF NOT EXISTS report_feedback (
+    report_id TEXT NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+    seq       INTEGER NOT NULL,
+    at        TEXT,
+    text      TEXT NOT NULL,
+    PRIMARY KEY (report_id, seq)
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS reports_fts USING fts5(
-    id UNINDEXED, name, summary, tags, body, tokenize = 'porter unicode61'
+    id UNINDEXED, name, summary, tags, body, feedback, tokenize = 'porter unicode61'
 );
 """
 
@@ -152,9 +160,14 @@ def _upsert(conn: sqlite3.Connection, rel: str, report: Report, body: str, diges
         "INSERT OR IGNORE INTO report_supersedes (report_id, old_id) VALUES (?, ?)",
         [(report.id, r) for r in report.supersedes if r != report.id],
     )
+    conn.executemany(
+        "INSERT INTO report_feedback (report_id, seq, at, text) VALUES (?, ?, ?, ?)",
+        [(report.id, i, e.get("at"), e["text"]) for i, e in enumerate(report.feedback)],
+    )
     conn.execute(
-        "INSERT INTO reports_fts (id, name, summary, tags, body) VALUES (?,?,?,?,?)",
-        (report.id, report.name, report.summary or "", " ".join(report.tags), body),
+        "INSERT INTO reports_fts (id, name, summary, tags, body, feedback) VALUES (?,?,?,?,?,?)",
+        (report.id, report.name, report.summary or "", " ".join(report.tags), body,
+         "\n".join(e["text"] for e in report.feedback)),
     )
 
 
@@ -279,6 +292,7 @@ class Filters:
     author: str | None = None
     since: str | None = None
     until: str | None = None
+    has_feedback: bool = False
 
 
 SORTS = {
@@ -294,6 +308,8 @@ def _where(f: Filters) -> tuple[str, list]:
     if f.project:
         clauses.append("r.project = ?")
         params.append(f.project)
+    if f.has_feedback:
+        clauses.append("r.id IN (SELECT report_id FROM report_feedback)")
     if f.topic:
         clauses.append("r.topic = ?")
         params.append(f.topic)
@@ -345,7 +361,7 @@ def search(conn: sqlite3.Connection, query: str, f: Filters, limit: int = 20):
         FROM reports_fts
         JOIN reports r ON r.id = reports_fts.id
         WHERE reports_fts MATCH ?{where}
-        ORDER BY bm25(reports_fts, 0, 10.0, 5.0, 3.0, 1.0)
+        ORDER BY bm25(reports_fts, 0, 10.0, 5.0, 3.0, 1.0, 2.0)
         LIMIT ?
     """
     return conn.execute(sql, [query, *params, limit]).fetchall()
@@ -400,6 +416,17 @@ def links(conn: sqlite3.Connection, report_id: str):
         (report_id,),
     ).fetchall()
     return out, back
+
+
+def feedback_list(conn: sqlite3.Connection, f: Filters, limit: int | None = None):
+    """Feedback entries across reports, newest first, with their report's details."""
+    where, params = _where(f)
+    sql = f"""SELECT fb.at, fb.text, r.id, r.name, r.project, r.topic, r.type, r.author, r.rating, r.date
+              FROM report_feedback fb JOIN reports r ON r.id = fb.report_id{where}
+              ORDER BY COALESCE(fb.at, r.date) DESC, fb.seq DESC"""
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+    return conn.execute(sql, params).fetchall()
 
 
 def topic_counts(conn: sqlite3.Connection, project: str | None = None):
